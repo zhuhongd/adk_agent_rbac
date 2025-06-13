@@ -32,5 +32,5 @@ Made with 💙 and ☕ by Hongda Zhu and Megan Washington, with support from our
 
 Special thank you to Ian Bigford, Abdulla Hammad, and Gurleen Kaur for providing valuable resources for bringing this project to life.
 
-## Project status
-This POC was created for the [2025 AI Hackathon](https://docs.google.com/document/d/1nbknxD5slmAkD4kvO0Rjj9SS30Yp8C3TV5ZvrtJqeKQ/edit?tab=t.0#heading=h.x8hecfidt0o4). We plan to build on this in the future.
+## DEMO video:
+https://drive.google.com/file/d/1-UdxMt8Vn7c83zvRlIgfwhEgIFtdvbLe/view
