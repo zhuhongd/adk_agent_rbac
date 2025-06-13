@@ -1,0 +1,25 @@
+# ── Google Cloud / Auth ─────────────────────────────────────────────
+google-cloud-bigquery>=3.14.1           # BigQuery client (includes pandas helpers)
+google-auth>=2.29.0                     # Service-account creds
+google-auth-oauthlib>=1.2.0             # Needed by some Google loaders
+
+# ── Google Agent Development Kit ───────────────────────────────────
+# PyPI name may change; install from GitHub if not on PyPI yet:
+# pip install "google-adk @ git+https://github.com/google/adk.git@main"
+google-adk>=0.2.0
+
+# ── LangChain & Gemini integrations ────────────────────────────────
+langchain>=0.1.20
+langchain-google-genai>=0.0.6           # ChatGoogleGenerativeAI, embeddings
+langchain-google-community>=0.0.6       # GoogleDriveLoader, etc.
+
+# ── Vector store back-end ───────────────────────────────────────────
+faiss-cpu>=1.7.4                        # Required by langchain_community.vectorstores.FAISS
+
+# ── Utility / data handling ────────────────────────────────────────
+python-dotenv>=1.0.1                    # load_dotenv
+pandas>=2.2.2                           # BigQuery → DataFrame operations
+
+# ── ⚠ Optional (uncomment if you expose an API) ────────────────────
+# fastapi>=0.111.0
+# uvicorn[standard]>=0.30.0
