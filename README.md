@@ -1,5 +1,8 @@
 # agent_building
 
+## DEMO video:
+https://drive.google.com/file/d/1-UdxMt8Vn7c83zvRlIgfwhEgIFtdvbLe/view
+
 ## Description
 This RBAC agent answers questions about RBAC policy, procedures, and implementation, by referencing documentation and BigQuery resources.
 
@@ -31,6 +34,3 @@ You can also document commands to lint the code or run tests. These steps help t
 Made with 💙 and ☕ by Hongda Zhu and Megan Washington, with support from our manager Varun Naroia
 
 Special thank you to Ian Bigford, Abdulla Hammad, and Gurleen Kaur for providing valuable resources for bringing this project to life.
-
-## DEMO video:
-https://drive.google.com/file/d/1-UdxMt8Vn7c83zvRlIgfwhEgIFtdvbLe/view
