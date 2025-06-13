@@ -2,6 +2,7 @@ import os
 from pathlib import Path
 from typing import Optional
 import traceback
+import re
 
 from dotenv import load_dotenv
 from google.oauth2.service_account import Credentials
@@ -24,10 +25,9 @@ from google.cloud import bigquery
 SCRIPT_DIR = Path(__file__).parent.absolute()
 print(f"📂 Script directory: {SCRIPT_DIR}")
 
-# CREDENTIALS_PATH = SCRIPT_DIR / "credentials.json"
-# os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(CREDENTIALS_PATH)
-CREDENTIALS_PATH = os.getenv("GOOGLE_CREDENTIALS_PATH")
-print(f"🔑 Credentials path: {CREDENTIALS_PATH}  |  Exists: {Path(CREDENTIALS_PATH).exists()}")
+CREDENTIALS_PATH = SCRIPT_DIR / "credentials.json"
+os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = str(CREDENTIALS_PATH)
+print(f"🔑 Credentials path: {CREDENTIALS_PATH}  |  Exists: {CREDENTIALS_PATH.exists()}")
 
 ENV_PATH = SCRIPT_DIR / ".env"
 if ENV_PATH.exists():
@@ -57,8 +57,8 @@ def say_hello(name: Optional[str] = None) -> str:
 def say_goodbye() -> str:
     return (
         "Good-bye! If you have more questions later, just ask. "
-        # "Have a great day! (Joke: Why did the computer go to therapy? "
-        # "Because it had too many bytes!)"
+        "Have a great day! (Joke: Why did the computer go to therapy? "
+        "Because it had too many bytes!)"
     )
 
 # ───────── NORMALISE & BUILD WHERE ─────────
@@ -68,23 +68,14 @@ def _norm(txt: str) -> str:
     """Lowercase & strip everything except letters/digits."""
     return re.sub(r"[^a-z0-9]+", "", txt.lower())
 
-def build_where(user_query: str, default_col: str = "rbacitemname") -> str:
-    """
-    Translate a free-form conditions string into AND-joined SQL clauses.
-
-    Rules:
-      • "proj.dataset.table"  → match project part on `section`
-      • email@foo             → LIKE on `email`
-      • col:value             → LIKE on that col  (normalised for rbacitemname)
-      • plain text            → fuzzy LIKE on default_col  (normalised)
-    """
+def build_where(user_query: str, default_col: str = "RbacItemName") -> str:
     clauses = []
     for raw in user_query.split(","):
         frag = raw.strip().strip("'\"")
         if not frag:
             continue
 
-        # project path
+        # project path (verify 'section' exists)
         if "." in frag and frag.count(".") <= 2:
             project = frag.split(".")[0]
             clauses.append(
@@ -92,20 +83,27 @@ def build_where(user_query: str, default_col: str = "rbacitemname") -> str:
                 f"LIKE '%{_norm(project)}%'"
             )
 
-        # email
+        # email correction
         elif "@" in frag and "." in frag:
-            clauses.append(f"LOWER(email) LIKE LOWER('%{frag}%')")
+            clauses.append(f"LOWER(EmployeeEmail) LIKE LOWER('%{frag}%')")
 
         # explicit col:value
         elif ":" in frag:
-            col, val = [s.strip().lower() for s in frag.split(":", 1)]
-            if col == "rbacitemname":
-                clauses.append(
-                    f"REGEXP_REPLACE(LOWER({col}), r'[^a-z0-9]', '') "
-                    f"LIKE '%{_norm(val)}%'"
-                )
-            else:
+            col, val = [s.strip() for s in frag.split(":", 1)]
+            # Normalize explicitly known columns
+            valid_cols = {
+                'employeenumber', 'employeename', 'employeeemail', 'managername',
+                'manageremail', 'employeedivision', 'employeedepartment',
+                'employeesubdepartment', 'employeeteam', 'employeesubteam',
+                'rbacitemcode', 'rbacitemname', 'rbacitemdepartment', 'indirectreporter'
+            }
+            if col.lower() in valid_cols:
                 clauses.append(f"LOWER({col}) LIKE LOWER('%{val}%')")
+            else:
+                clauses.append(
+                    f"REGEXP_REPLACE(LOWER({default_col}), r'[^a-z0-9]', '') "
+                    f"LIKE '%{_norm(frag)}%'"
+                )
 
         # plain text → fuzzy on default column
         else:
@@ -257,150 +255,6 @@ def query_gbq_permissions(conditions: str):
     df=client.query(sql).to_dataframe()
     return df.to_json()
 
-def get_gbq_query_results(sql_path, columns, conditions):
-    creds = Credentials.from_service_account_file(
-        str(CREDENTIALS_PATH),
-        scopes=["https://www.googleapis.com/auth/bigquery"],
-    )
-    
-    client = bigquery.Client(credentials=creds, project='geotab-dna-test')
-
-    full_sql_path = SCRIPT_DIR / sql_path
-    with open(full_sql_path) as file:
-        sql_template = file.read()
-    conditions_list = conditions.split(",")
-    conditions_list = [x.strip() for x in conditions_list]
-    conditions_string = "\nAND ".join(conditions_list)
-    sql = sql_template.format(columns=columns) + "\nAND " + conditions_string
-    df=client.query(sql).to_dataframe()
-    return df.to_json()
-
-def query_gbq_roles(columns: str, conditions: str):
-    """
-    Retrieves data about RBAC roles from a table, if they meet the given conditions.
-    Each condition is a `WHERE` clause condition comparing the user-provided value to a column from the table.
-    Write each condition using the format `LOWER(column name) LIKE LOWER('%search value%')`.
-    Join the conditions into a string of comma-separated values.
-
-    The table schema is listed below, in format `column name: description`
-    - EmployeeNumber: An alphanumeric identifier of the employee
-    - EmployeeName: An employee's first and last name
-    - EmployeeEmail: An employee's email address
-    - ManagerName: The employee's direct manager's first and last name
-    - ManagerEmail: The employee's direct manager's email address
-    - EmployeeDivision: The company division the employee belongs to
-    - EmployeeDepartment: The company department the employee belongs to
-    - EmployeeSubDepartment: The company subdepartment the employee belongs to
-    - EmployeeTeam: The company team the employee belongs to
-    - EmployeeSubTeam: The company subteam the employee belongs to
-    - RbacItemCode: An alphanumeric identifier of the Rbac role
-    - RbacItemName: A name for the Rbac role
-    - RbacItemDepartment: A category for the Rbac role
-    - IndirectReporter: An indirect manager of the employee
-
-    Determine which columns are necessary to answer the given inquiry. Create a comma-separated list of onlyl these columns. Do not include irrelvant columns.
-
-    For the columns and conditions arguments, use the column names from the table schema above.
-
-    Args:
-        columns (str): A comma-separated list of ONLY the columns needed to answer the question
-        conditions (str): A comma-separated list of SQL `WHERE` clause conditions to apply to the base query.
-
-    Returns:
-        str: A json-formatted string including the query results.
-    """
-
-    sql_path = "queries/rbac_roles.sql"
-
-    return get_gbq_query_results(sql_path, columns, conditions)
-
-def query_gbq_data_stewards(columns: str, conditions: str):
-    """
-    Retrieves data about which specific data stewards, rbac owners, rbac champions, and rbac roles are assigned to functional areas (also called FA), if they meet the given conditions.
-    Each condition is a `WHERE` clause condition comparing the user-provided value to a column from the table.
-    Write each condition using a format appropriate for the column's data type:
-    - For `string` type, use format `LOWER(column name) LIKE LOWER('%search value%')`.
-    - For `integer` type, use format `column name x search value`, where `x` is a comparison operator `>`,`<`,`>=`,`<=`, or `=`
-    - For `boolean` type, use format `column name IS TRUE` for a positive match or `column name IS FALSE` for a negative match
-    
-    Join the conditions into a string of comma-separated values.
-
-    The table schema is listed below, in format `column name (data type): description`
-    - RoleId (integer): A unique identifier for the roel
-    - FunctionalAreaName (string): A descriptive name for the Functional Area
-    - FunctionalAreaCode (string): A short identifier for the Functional Area
-    - DataPractitionerRbacRole (string): A name for the Data Practitioner Rbac Role. Data practitioners view, query, and create datasets and tables.
-    - DataPractitionerRbacRoleDescription (string): A description of the DataPractitionerRbacRole
-    - DataPractitionerRbacRoleActive (string): Whether the DataPractitionerRbacRole is active (TRUE) or not (FALSE)
-    - DataPractictionerRbacCode (string): An alphanumeric identifier for the Functional Area's data practitioner rbac role. Data practitioners view, query, and create datasets and tables. 
-    - DataPractitionerRbacRoleStatus (string): The approval status of the DataPractitionerRbacRole
-    - DepartmentName (string): The department associated with the functional area
-    - DataStewardName (string): The first and last names of data stewards assigned to the functional area. Individual stewards names are separated by a semi-colon
-    - DataStewardEmail (string): The email addresses of data stewards assigned to the functional area. Individual email addresses are separated by a semi-colon
-    - RbacOwners (string): The email addresses of the rbac owners. Rbac owners approve changes to Rbacs roles. Individual email addresses are separated by a semi-colon
-    - RbacChampions (string): The email addresses of the rbac champions. Rbac champions assigns users to and removes users from rbac roles. Individual email addresses are separated by a semi-colon
-    - DataPractitionerCount (integer): The number of Data Practitioners in the Functional Area
-    - DataStewardCode (string): An alphanumeric identifier for the Functional Area's data steward rbac role. Data stewards are accountable for the organization and quality of data.
-    - DataStewardRole (string): A name for the Data Steward Rbac Role.
-    
-    Determine which columns are necessary to answer the given inquiry. Create a comma-separated list of onlyl these columns. Do not include irrelvant columns.
-
-    For the columns and conditions arguments, use the column names from the table schema above.
-
-    Args:
-        columns (str): A comma-separated list of ONLY the columns needed to answer the question
-        conditions (str): A comma-separated list of SQL `WHERE` clause conditions to apply to the base query.
-
-    Returns:
-        str: A json-formatted string including the query results.
-    """
-
-    sql_path = "queries/data_stewards.sql"
-
-    return get_gbq_query_results(sql_path, columns, conditions)
-
-def query_gbq_permissions(columns: str, conditions: str):
-    """
-    Retrieves data about permissions assigned to RBAC roles from a table, if they meet the given conditions.
-    Each condition is a `WHERE` clause condition comparing the user-provided value to a column from the table.
-    Write each condition using the format `LOWER(column name) LIKE LOWER('%search value%')`.
-    Join the conditions into a string of comma-separated values.
-
-    The table schema is listed below, in format `column name: description`
-    - RbacItemCode: The RBAC name the user has. For example: 'DATA-DNA02' or like 'DATA-DNA01'
-    - System: The system the RBAC applies to.
-    - Section: The GBQ project (e.g., 'geotab-dna-prod').
-    - Permission: The permission associated with the RBAC.
-    - RbacItemName: A readable name for the RBAC role.
-    - Provisioned: True → user has the permission; False → does not.
-    - EmployeeNumber: Alphanumeric employee ID.
-    - EmployeeName: Employee’s full name.
-    - EmployeeEmail: Employee’s email address.
-    - ManagerName: Direct manager’s name.
-    - ManagerEmail: Direct manager’s email.
-    - EmployeeDivision: Division the employee belongs to.
-    - EmployeeDepartment: Department the employee belongs to.
-    - EmployeeSubDepartment: Sub-department.
-    - EmployeeTeam: Team the employee belongs to.
-    - EmployeeSubTeam: Sub-team.
-    - IndirectReporter: Higher-level manager (manager’s manager, etc.).
-
-    Determine which columns are necessary to answer the given inquiry. Create a comma-separated list of onlyl these columns. Do not include irrelvant columns.
-
-    For the columns and conditions arguments, use the column names from the table schema above.
-
-    Args:
-        columns (str): A comma-separated list of ONLY the columns needed to answer the question
-        conditions (str): A comma-separated list of SQL `WHERE` clause conditions to apply to the base query.
-
-    Returns:
-        str: A json-formatted string including the query results.
-    """
-
-    sql_path = "queries/rbac_permission.sql"
-
-    return get_gbq_query_results(sql_path, columns, conditions)
-
 # ──────────────────────────────────────────────────────────────────────────────
 # AGENTS
 # ──────────────────────────────────────────────────────────────────────────────
@@ -417,9 +271,119 @@ greeting_agent = Agent(
 farewell_agent = Agent(
     model=MODEL_CHAT_FLASH,                ### CHANGED
     name="farewell_agent",
-    instruction="Use `say_goodbye` to say goodbye; then tell a workplace-appropriate technology-related joke.",
+    instruction="Use `say_goodbye` to say goodbye; do nothing else.",
     description="Says farewell to the user.",
     tools=[say_goodbye],
+)
+
+roles_agent = Agent(
+    model=MODEL_CHAT_FLASH,                ### CHANGED
+    name="roles_agent",
+    instruction=(
+        """Table column names and their descriptions are listed below, in format `column name: description`
+- EmployeeNumber: An alphanumeric identifier of the employee
+- EmployeeName: An employee's first and last name
+- EmployeeEmail: An employee's email address  # <== fix this
+- ManagerName: The employee's direct manager's first and last name
+- ManagerEmail: The employee's direct manager's email address
+- EmployeeDivision: The company division the employee belongs to
+- EmployeeDepartment: The company department the employee belongs to
+- EmployeeSubDepartment: The company subdepartment the employee belongs to
+- EmployeeTeam: The company team the employee belongs to
+- EmployeeSubTeam: The company subteam the employee belongs to
+- RbacItemCode: An alphanumeric identifier of the Rbac role
+- RbacItemName: A name for the Rbac role
+- RbacItemDepartment: A category for the Rbac role
+- IndirectReporter: An indirect manager of the employee
+        """
+        "If a user asks something, but you did not find an answer, try run the entire script again, and look for context using fuzzy match, and confirm with the user."
+        "Seperate your answer by line for better readibility."
+        "After giving your answers, return back to root_agent/"
+        "do nothing else."
+
+    ),
+    description="Queries a BigQuery table about Rbac roles, using conditions provided by the user.",
+    tools=[query_gbq_roles],
+)
+
+data_stewards_agent = Agent(
+    model=MODEL_CHAT_FLASH,                ### CHANGED
+    name="data_stewards_agent",
+    instruction=(
+        "Use `query_gbq_data_stewards` to answer questions about which specific data stewards, rbac owners, rbac champions, and rbac roles are assigned to functional areas (also called FA)."
+        "`query_gbq_data_stewards` uses SQL to query a table, and return the results."
+        "If the user provides a search value, map it to a column from the table, then format the search value for the query."
+        f"For string data type columns, use the format `LOWER(column name) LIKE LOWER('%search value%')`."
+        "For integer data type columns, use the format `column name x search value`, where `x` is a comparison operator `>`,`<`,`>=`,`<=`, or `=`"
+        "For boolean data type columns, use the format `column name IS TRUE` for a positive match or `column name IS FALSE` for a negative match"
+        "Pass the formatted search values to `query_gbq_data_stewards` as a comma-separated list string."
+        """Table column names and their descriptions are listed below, in format `column name (data type): description`
+- RoleId (integer): A unique identifier for the roel
+- FunctionalAreaName (string): A descriptive name for the Functional Area
+- FunctionalAreaCode (string): A short identifier for the Functional Area
+- DataPractitionerRbacRole (string): A name for the Data Practitioner Rbac Role. Data practitioners view, query, and create datasets and tables.
+- Description (string): A description of the DataPractitionerRbacRole
+- Active (string): Whether the DataPractitionerRbacRole is active (TRUE) or not (FALSE)
+- DataPractictionerRbacCode (string): An alphanumeric identifier for the Functional Area's data practitioner rbac role. Data practitioners view, query, and create datasets and tables. 
+- Status (string): The approval status of the DataPractitionerRbacRole
+- DepartmentName (string): The department associated with the functional area
+- DataStewardName (string): The first and last names of data stewards assigned to the functional area. Individual stewards names are separated by a semi-colon
+- DataStewardEmail (string): The email addresses of data stewards assigned to the functional area. Individual email addresses are separated by a semi-colon
+- RbacOwners (string): The email addresses of the rbac owners. Rbac owners approve changes to Rbacs roles. Individual email addresses are separated by a semi-colon
+- RbacChampions (string): The email addresses of the rbac champions. Rbac champions assigns users to and removes users from rbac roles. Individual email addresses are separated by a semi-colon
+- DataPractitionerCount (integer): The number of Data Practitioners in the Functional Area
+        """
+        "If a user asks something, but you did not find an answer, try run the entire script again, and look for context that most aligned with the user, and confirm with the user."
+        "Seperate your answer by line for better readibility."
+        "After giving your answers, return back to root_agent."
+        "do nothing else."
+
+    ),
+    description="Queries a BigQuery table about users and roles assigned to functional areas, using conditions provided by the user.",
+    tools=[query_gbq_data_stewards],
+)
+
+permission_agent = Agent(
+    model=MODEL_CHAT_FLASH,
+    name="permission_agent",
+    instruction=(
+        # ——— HOW TO USE THE TOOL ———
+        "Use `query_gbq_permissions` to answer questions about RBAC permissions. "
+        "If the user gives a dataset, project or table (e.g. 'geotab-dna-test.device_EU.tabl1'), "
+        "only look for the characters before the first '.', which is 'geotab-dna-test', to go and match with the section"
+        "Multiple conditions may be joined with comma-separated input.\n\n"
+        # ——— COLUMN DEFINITIONS ———
+        """Table columns:
+        - RbacItemCode: The RBAC name the user has.
+        - System: The system the RBAC applies to.
+        - Section: The GBQ project.
+        - Permission: The permission associated with the RBAC.
+        - RbacItemName: A readable name for the RBAC role.
+        - Provisioned: True → user has the permission; False → does not.
+        - EmployeeNumber: Alphanumeric employee ID.
+        - EmployeeName: Employee’s full name.
+        - EmployeeEmail: Employee’s email address  # <== fix this
+        - ManagerName: Direct manager’s name.
+        - ManagerEmail: Direct manager’s email.
+        - EmployeeDivision: Division the employee belongs to.
+        - EmployeeDepartment: Department the employee belongs to.
+        - EmployeeSubDepartment: Sub-department.
+        - EmployeeTeam: Team the employee belongs to.
+        - EmployeeSubTeam: Sub-team.
+        - IndirectReporter: Higher-level manager.
+        """
+        "Seperate your answer by line for better readibility"
+        "If a person ask about their own permissions, use `LOWER(EmployeeEmail) LIKE LOWER('%email%')` ..."
+        "If a person wants to know if he has access to say 'geotab-dna-test.RbacAgent_EU.RbacRoles`' table, but his section and project has geotab-dna-test, then thats a yes. "
+        "If a person asks about permissions for a specific person or group of people, use `LOWER(EmployeeName) LIKE LOWER('%name%')` where name is the person's name.\n"
+        "If a person asks about permissions for a specific team, use `LOWER(EmployeeTeam) LIKE LOWER('%team%')` where team is the team's name.\n"
+        "If a user asks something, but you did not find an answer, try run the entire script again, and look for context using fuzzy match, and confirm with the user."
+        "Seperate your answer by line for better readibility."
+        "After giving your answers, return back to root_agent."
+        "do nothing else."
+    ),
+    description="Answers RBAC permission related questions by querying the BigQuery permissions table.",
+    tools=[query_gbq_permissions],
 )
 
 gbq_agent = Agent(
@@ -427,18 +391,19 @@ gbq_agent = Agent(
     model=MODEL_CHAT_FLASH,
     description="Answers FA and RBAC questions by querying BigQuery tables",
     instruction=(
-        "If the user asks about Functional Area (FA) roles, data stewards, owners, champions, or practitioners → delegate to `query_gbq_data_stewards`"
-        "If the user asks about being added or removed from a role or FA  → delegate to `query_gbq_data_stewards`"
-        "If the user asks about which roles are assigned to a specific person or group of people → delegate to `query_gbq_roles`"
-        "If the user asks whether they have access to a GBQ dataset, table, or project → delegate to `query_gbq_permissions`.\n"
-        "If the user want to know the RBAC permission they could have, -> delegate to `query_gbq_permissions`.\n"
+        "If the user asks about Functional Area (FA) roles, data stewards, owners, champions, or practitioners → delegate to `data_stewards_agent`"
+        "If the user asks about being added or removed from a role or FA  → delegate to `data_stewards_agent`"
+        "If the user asks about which roles are assigned to a specific person or group of people → delegate to `roles_agent`"
+        "If the user asks whether they have access to a GBQ dataset, table, or project → delegate to `permission_agent`.\n"
+        "If the user want to know the RBAC permission they could have, -> delegate to `permission_agent`.\n"
         "Summarize the delegated agent's results, and give it to the user directly."
         "After giving your answers, return back to root_agent."
         "Seperate your answer by line for better readibility."
         "do nothing else."
     ),
-    tools=[query_gbq_roles, query_gbq_data_stewards, query_gbq_permissions]
+    tools=[AgentTool(roles_agent), AgentTool(data_stewards_agent), AgentTool(permission_agent)]
 )
+
 
 root_agent = Agent(
     name="geotab_rbac_agent",
@@ -447,8 +412,9 @@ root_agent = Agent(
     instruction=(
         "You are the main Agent coordinating a team."
         "Analyze the user's query."
-        "If the user greets → delegate to `say_hello`.\n"
+        "If the user greets → delegate to `greeting_agent`.\n"
         "If the user says bye → delegate to `farewell_agent`.\n"
+        # "If the user asks to see roles for an email address use `query_gbq_roles`.\n"
         "If the user asks about a functional area (FA) name, role name, role code, user name, or user email → delegate to `gbq_agent`.\n"
         "If the user asks whether they have access to a GBQ dataset, table, or project → delegate to `gbq_agent`.\n"
         "If the user want to know the RBAC permission they could have, -> delegate to `gbq_agent`.\n"
@@ -457,5 +423,7 @@ root_agent = Agent(
         "Be precise with role / permission names and cite source docs."
         "After each answer, when the user is asking a new question, always coming back to the root_agent first"
     ),
-    tools=[query_rbac_documents, say_hello, AgentTool(farewell_agent), AgentTool(gbq_agent)]
+    tools=[query_rbac_documents, AgentTool(greeting_agent), AgentTool(farewell_agent), AgentTool(gbq_agent)]
+    # sub_agents=[greeting_agent, farewell_agent, gbq_agent],
 )
+
